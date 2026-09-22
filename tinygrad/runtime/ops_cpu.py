@@ -57,7 +57,7 @@ class CPUProgram(Program['CPUDevice']):
 
   def __call__(self, *bufs:int, global_size:tuple[int,int,int]=(1,1,1), local_size:tuple[int,int,int]=(1,1,1),
                vals:tuple[int|None, ...]=(), wait:bool=False, timeout:int|None=None) -> float|None:
-    args = [*bufs, *cast(tuple[int, ...], vals)]
+    args = [bufs[slot] if slot < len(bufs) else cast(int, vals[slot-len(bufs)]) for _, slot, *_ in self.signature]
     if (remote:=self.dev.remote) is not None:
       data = struct.pack(f'<{len(args)}Q', *(a & 0xffffffffffffffff for a in args))
       ret = (remote._rpc if wait else remote._post)(remote.sock, RemoteCmd.EXEC_PROG, self.fxn, len(args), int(wait), payload=data)
