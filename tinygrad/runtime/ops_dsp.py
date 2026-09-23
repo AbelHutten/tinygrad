@@ -25,6 +25,7 @@ class DSPRenderer(ClangRenderer):
       'unsigned long long HAP_perf_get_time_us(void);'] + super()._render_defines(uops)
 
   def _render_entry(self, function_name:str, bufs:list[tuple[str,tuple[UOp,bool]]]) -> str:
+    slots = sorted((u.arg.slot,i) for i,(_,(u,_)) in enumerate(bufs) if u.addrspace == AddrSpace.GLOBAL)
     msrc = ['int entry(unsigned long long handle, unsigned int sc, remote_arg* pra) {',
             'struct dcvs_v2_req req = {.type=7, .dcvs_enable=0, .set_latency=1, .latency=100, .set_dcvs_params=1, .target_corner = 6 /* TURBO */};',
             'HAP_power_set((void*)handle, (void*)&req);']
@@ -32,9 +33,8 @@ class DSPRenderer(ClangRenderer):
     msrc += [f'{self._render_dtype(b[1][0].dtype) if b[1][0].addrspace == AddrSpace.ALU else "int"} sz_or_val_{i} = '
              f'*({self._render_dtype(b[1][0].dtype) if b[1][0].addrspace == AddrSpace.ALU else "int"}*)((char*)pra[0].buf.pv+{i*8});'
              for i,b in enumerate(bufs)]
-    msrc += [f'int off{i} = ((int*)pra[1].buf.pv)[{i}];' for i,b in enumerate(bufs) if b[1][0].addrspace == AddrSpace.GLOBAL]
-    msrc += [f'void *buf_{i} = HAP_mmap(0,sz_or_val_{i},3,0,pra[{i+3}].dma.fd,0)+off{i};'
-             for i,b in enumerate(bufs) if b[1][0].addrspace == AddrSpace.GLOBAL]
+    msrc += [f'int off{i} = ((int*)pra[1].buf.pv)[{slot}];' for slot, (_,i) in enumerate(slots)]
+    msrc += [f'void *buf_{i} = HAP_mmap(0,sz_or_val_{i},3,0,pra[{slot+3}].dma.fd,0)+off{i};' for slot, (_,i) in enumerate(slots)]
     msrc += ["unsigned long long start = HAP_perf_get_time_us();"]
     fbufs = [(f'buf_{i}' if b[1][0].addrspace == AddrSpace.GLOBAL else f'sz_or_val_{i}') for i,b in enumerate(bufs)]
     msrc += [f"{function_name}({', '.join(fbufs)});"]
@@ -64,8 +64,8 @@ class DSPProgram(Program['DSPDevice']):
 
     pra, fds, attrs, _ = rpc_prep_args(ins=[var_vals_mv:=memoryview(bytearray((len(bufs)+len(vals))*8)), off_mv:=memoryview(bytearray(len(bufs)*4))],
                                        outs=[timer:=memoryview(bytearray(8)).cast('Q')], in_fds=[b.share_info.fd for b in bufs])
-    for i,b in enumerate(bufs): struct.pack_into('i', var_vals_mv, i*8, b.size)
-    for i,(v,(_,_,dt,_)) in enumerate(zip(vals, self.signature[len(bufs):]), start=len(bufs)): struct.pack_into(unwrap(dt.fmt), var_vals_mv, i*8, v)
+    for i,(_,slot,dt,_) in enumerate(self.signature):
+      struct.pack_into(*(('i', var_vals_mv, i*8, bufs[slot].size) if slot < len(bufs) else (unwrap(dt.fmt), var_vals_mv, i*8, vals[slot-len(bufs)])))
     off_mv.cast('I')[:] = array.array('I', tuple(b.offset for b in bufs))
     self.dev.exec_lib(self.lib, rpc_sc(method=2, ins=2, outs=1, fds=len(bufs)), pra, fds, attrs)
     return timer[0] / 1e6
@@ -281,11 +281,11 @@ class MockDSPProgram(Program[DSPDevice]):
       dsp_lib.flush()
       os.chmod(dsp_lib.name, 0o0777)
       proc = subprocess.run(["qemu-hexagon-static", *(['-strace'] if DEBUG >= 5 else []), dsp_lib.name],
-        input=b''.join([bytes(to_mv(x.va_addr, x.size)) for x in bufs] +
-                       [struct.pack(unwrap(dt.fmt), x) for x,(_,_,dt,_) in zip(vals, self.signature[len(bufs):])]),
+        input=b''.join([bytes(to_mv(bufs[slot].va_addr, bufs[slot].size)) if slot < len(bufs)
+                         else struct.pack(unwrap(dt.fmt), vals[slot-len(bufs)]) for _,slot,dt,_ in self.signature]),
         stdout=subprocess.PIPE, check=True)
     offset = 4
-    for x in bufs:
+    for x in (bufs[slot] for _,slot,*_ in self.signature if slot < len(bufs)):
       to_mv(x.va_addr, x.size)[:] = proc.stdout[offset:offset+x.size]
       offset += x.size
     assert offset == len(proc.stdout)
