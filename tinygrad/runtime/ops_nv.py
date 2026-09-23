@@ -175,7 +175,8 @@ class NVComputeQueue(NVQueue):
       qmd.set_constant_buf_addr(j, qmd_addr + UOp.const(self.qmd_sz, dtypes.uint64) if j == 0 else lib.getaddr(self.devs) + off)
     bufs, vals = [get_call_arg_uops(call)[j] for j in prg.arg.globals], get_call_var_uops(call, prg)
     qmd.mv[self.qmd_sz:(at:=self.qmd_sz + len(data.cbuf_0) * 4)] = array.array('I', data.cbuf_0).tobytes() # constant buffer 0: the driver params
-    qmd.patches |= dict(layout_args([b.getaddr(self.devs) for b in bufs] + [v.ccast(dt) for v, dt in zip(vals, data.vars)], at))
+    args = [b.getaddr(self.devs) for b in bufs] + [v.ccast(dt) for v, dt in zip(vals, data.vars)]
+    qmd.patches |= dict(layout_args([args[slot] for _, slot, *_ in data.signature], at))
 
     if self.prev_qmd is None:
       if self.dev.pma_enabled: self.nvm(1, nv_gpu.NVC6C0_PM_TRIGGER, 0)
@@ -205,7 +206,7 @@ class NVCopyQueue(NVQueue):
 
 class NVProgramData:
   def __init__(self, dev:NVDevice, obj:TinyELF):
-    name, signature, mock = obj.name, obj.signature, isinstance(dev.iface, MOCKIface)
+    name, self.signature, mock = obj.name, obj.signature, isinstance(dev.iface, MOCKIface)
     self.constbufs: dict[int, tuple[int, int]] = {0: (0, 0x160)} # dict[constbuf index, tuple[offset in the image, size]]
     self.relocs: list[tuple[int, int, DType, int]] = [] # (byte offset in the image, symbol offset, width, shift) of the program's address
     self.prog_off, self.cbuf_0, sections, relocs = 0, [], list[Any](), list[Any]()
@@ -244,15 +245,14 @@ class NVProgramData:
       min_cbuf0_entries = 224 if dev.iface.compute_class >= nv_gpu.BLACKWELL_COMPUTE_A else 12
       self.cbuf_0 = [0] * max(cbuf0_size // 4, min_cbuf0_entries)
 
-    # the arguments follow the driver params in constant buffer 0: the buffers as 64 bit addresses, then the vars packed by their width
-    nbufs = sum(name is None for name, *_ in signature)
-    self.vars = [dtypes.uint64 if mock else dt for _,_,dt,_ in signature[nbufs:]] # mockgpu wants every var 64 bit
-    if mock: self.cbuf_0[80:82] = [nbufs, len(self.vars)] # mockgpu reads the arg counts out of cbuf0
+    # the arguments follow the driver params in constant buffer 0: the buffers as 64 bit addresses, the vars packed by their width
+    self.vars = [dtypes.uint64 if mock else dt for name,_,dt,_ in self.signature if name is not None] # mockgpu wants every var 64 bit
+    if mock: self.cbuf_0[80] = len(self.signature) # mockgpu reads the arg counts out of cbuf0
 
     # NOTE: Ensure at least 4KB of space after the program to mitigate prefetch memory faults.
     self.image = image.ljust(round_up(len(image), 0x1000) + 0x1000, b'\x00')
     # constant buffer 0 holds the driver params and every argument after them, and starts 256 aligned like all constant buffers
-    self.kernargs_size = round_up(max(self.constbufs[0][1], len(self.cbuf_0) * 4 + len(signature) * 8), 256)
+    self.kernargs_size = round_up(max(self.constbufs[0][1], len(self.cbuf_0) * 4 + len(self.signature) * 8), 256)
 
     # Ensure device has enough local memory to run the program
     dev._ensure_has_local_memory(lcmem)
