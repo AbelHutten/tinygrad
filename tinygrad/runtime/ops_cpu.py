@@ -11,6 +11,7 @@ from tinygrad.renderer.isa.x86 import X86Renderer
 from tinygrad.runtime.support.elf import jit_loader
 from tinygrad.runtime.support.system import RemotePCIDevice, RemoteCmd
 from tinygrad.runtime.autogen import libc
+from tinygrad.dtype import dtypes
 
 # NOTE: MAP_JIT is added to mmap module in python 3.13
 MAP_JIT = 0x0800
@@ -66,8 +67,9 @@ class CPUProgram(Program['CPUDevice']):
       if self.lvp:
         lvp_args = bytearray(12 + (len(bufs) + len(vals)) * 8)
         addr = mv_address(lvp_args)
-        struct.pack_into(f'<3I{len(bufs)}Q', lvp_args, 0, *data64_le(addr+12), (len(bufs)+len(vals))*2, *bufs)
-        for v,(off,dt) in zip(vals, TinyELF.iter_sig(self.signature[-len(vals):], len(bufs)*8)): struct.pack_into(f'<{dt.fmt}', lvp_args, 12+off, v)
+        sig = tuple((name, slot, dtypes.uint64 if slot < len(bufs) else dt, shape) for name,slot,dt,shape in self.signature)
+        struct.pack_into('<3I', lvp_args, 0, *data64_le(addr+12), (len(bufs)+len(vals))*2)
+        for v,(off,dt) in zip(args, TinyELF.iter_sig(sig)): struct.pack_into(f'<{dt.fmt}', lvp_args, 12+off, v)
         self.fxn(addr)
       else: self.fxn(*[ctypes.c_uint64(x) for x in args])
     return float(unwrap(prof.en) - prof.st) * 1e-6 if wait else None
