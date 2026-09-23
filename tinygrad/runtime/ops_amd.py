@@ -359,8 +359,8 @@ class AMDComputeQueue(HWQueue):
   ### exec
 
   def kernargs(self, call:UOp, prg:UOp, data:AMDProgramData) -> list[UOp]:
-    args = [get_call_arg_uops(call)[gi].getaddr(self.devs) for gi in prg.arg.globals] + \
-            [b.ccast(v.dtype) for v, b in zip(prg.arg.vars, get_call_var_uops(call, prg))] # a bound value is a bare const, the var has the width
+    args = [get_call_arg_uops(call)[gi].getaddr(self.devs) for gi in prg.arg.globals] + get_call_var_uops(call, prg)
+    args = [args[slot] if slot < len(prg.arg.globals) else args[slot].ccast(dt) for _,slot,dt,_ in prg.to_elf().signature]
     return pack_args(layout_args(args), data.kernargs_segment_size) + (dispatch_packet(data, prg.arg) if data.enable_dispatch_ptr else [])
 
   def exec(self, call:UOp, prg:UOp):
