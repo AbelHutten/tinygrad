@@ -1319,8 +1319,10 @@ class UOp(RandMixin, metaclass=UOpMetaClass):
     assert self.op is Ops.PROGRAM and isinstance(self.arg, ProgramInfo), "to_elf should only be called on a PROGRAM ast"
     # sig slots are compact: buffers in globals order (runtimes launch buffers in that order), then vars. raw call-arg
     # positions skip buffers for kernels using a sparse subset of the call's buffers (CL binds bufs[slot])
-    slots = (*self.arg.globals, *(v.arg.slot for v in self.arg.vars))
-    sig = tuple((u.arg.name, slots.index(u.arg.slot), u.dtype, u._shape) for u in self.src[1].src if u.op is Ops.PARAM)
+    gmap = {s:j for j, s in enumerate(self.arg.globals)}
+    vmap = {v.arg.slot: i + len(gmap) for i, v in enumerate(self.arg.vars)}
+    sig = tuple((u.arg.name, (vmap if u.addrspace == AddrSpace.ALU else gmap)[u.arg.slot],u.dtype, u._shape)
+                for u in self.src[1].src if u.op is Ops.PARAM)
     return TinyELF(self.src[3].arg, self.src[0].arg.function_name, self.arg.target, sig, self.key)
 
   @property
